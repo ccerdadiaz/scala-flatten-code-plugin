@@ -60,7 +60,6 @@ sbt ~flattenCode
 2. **Desarrolla normalmente** en múltiples archivos `.scala`
 3. **El archivo se regenera automáticamente** cuando guardas cambios
 4. **Copia y pega** el contenido del archivo de salida a la plataforma
-5. **Ctrl+C** para parar la supervisión
 
 ## Ejemplo de Estructura
 
@@ -175,7 +174,6 @@ sbt ~flattenCode
 2. **Develop normally** in multiple `.scala` files
 3. **File regenerates automatically** when you save changes
 4. **Copy and paste** the output file content to the platform
-5. **Ctrl+C** to stop watching
 
 ## Example Structure
 
