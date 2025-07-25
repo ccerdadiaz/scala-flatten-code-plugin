@@ -86,10 +86,15 @@ class CodeFlattener(sourceDirs: Seq[File], log: Logger) {
   
   private val allSourceFiles = mutable.Map[String, (File, String)]()
   private val localClassNames = mutable.Set[String]()
+  // NUEVO: Mapeo de paquete declarado -> archivos que lo contienen
+  private val packageToFiles = mutable.Map[String, mutable.Set[File]]()
   
   def flatten(inputFile: File): String = {
     log.debug("Loading all source files...")
     loadAllSourceFiles()
+    
+    log.debug("Building package index...")
+    buildPackageIndex()
     
     log.debug("Building local class index...")
     buildLocalClassIndex()
@@ -100,30 +105,101 @@ class CodeFlattener(sourceDirs: Seq[File], log: Logger) {
     val output = mutable.ListBuffer[String]()
     val alreadyProcessed = mutable.Set[String]()
 
-    def addDependenciesRecursively(content: String): Unit = {
-      val importedClasses = findImportedClasses(content)
-      
-      importedClasses.foreach { className =>
-        if (localClassNames.contains(className)) {
-          findFileContainingClass(className) match {
-            case Some((file, depContent)) if !alreadyProcessed.contains(file.getPath) =>
-              alreadyProcessed += file.getPath
-              val cleanContent = removePackagesAndImports(depContent)
-              output += cleanContent
-              log.debug(s"Added dependency: ${file.getName} for class $className")
-              addDependenciesRecursively(depContent)
-            case _ =>
-          }
-        }
-      }
-    }
-
+    // Añadir el archivo principal
     output += mainContent
     alreadyProcessed += inputFile.getPath
-    addDependenciesRecursively(inputContent)
+
+    // Procesar dependencias por nombre de clase (método existente)
+    addDependenciesRecursively(inputContent, alreadyProcessed, output)
+    
+    // NUEVO: Procesar dependencias por wildcards
+    addWildcardDependencies(inputContent, alreadyProcessed, output)
 
     log.debug(s"Flattening complete. Included ${alreadyProcessed.size} files")
     output.mkString("\n\n")
+  }
+  
+  /**
+   * Carga todos los archivos fuente disponibles
+   */
+  private def loadAllSourceFiles(): Unit = {
+    sourceDirs.foreach { dir =>
+      if (dir.exists() && dir.isDirectory) {
+        val scalaFiles = findScalaFiles(dir)
+        log.debug(s"Found ${scalaFiles.length} Scala files in ${dir.getPath}")
+        scalaFiles.foreach { file =>
+          val content = Source.fromFile(file).getLines().mkString("\n")
+          allSourceFiles(file.getPath) = (file, content)
+        }
+      }
+    }
+    log.debug(s"Loaded ${allSourceFiles.size} source files")
+  }
+  
+  /**
+   * Encuentra archivos .scala recursivamente
+   */
+  private def findScalaFiles(dir: File): List[File] = {
+    val files = mutable.ListBuffer[File]()
+    
+    def traverse(f: File): Unit = {
+      if (f.isDirectory) {
+        Option(f.listFiles()).foreach(_.foreach(traverse))
+      } else if (f.getName.endsWith(".scala")) {
+        files += f
+      }
+    }
+    
+    traverse(dir)
+    files.toList
+  }
+  
+  /**
+   * Construye un índice de paquete -> archivos que declaran ese paquete
+   */
+  private def buildPackageIndex(): Unit = {
+    allSourceFiles.values.foreach { case (file, content) =>
+      extractPackageDeclaration(content) match {
+        case Some(packageName) =>
+          packageToFiles.getOrElseUpdate(packageName, mutable.Set[File]()) += file
+          log.debug(s"File ${file.getName} declares package: $packageName")
+        case None =>
+          log.debug(s"File ${file.getName} has no package declaration")
+      }
+    }
+    
+    log.debug(s"Package index built: ${packageToFiles.keys.mkString(", ")}")
+  }
+  
+  /**
+   * Construye índice de nombres de clases locales
+   */
+  private def buildLocalClassIndex(): Unit = {
+    allSourceFiles.values.foreach { case (_, content) =>
+      val classNames = extractClassDefinitions(content)
+      localClassNames ++= classNames
+    }
+    log.debug(s"Local class names found: ${localClassNames.mkString(", ")}")
+  }
+  
+  /**
+   * Extrae la declaración de paquete de un archivo
+   * "package a.b.geometry" -> Some("a.b.geometry")
+   */
+  private def extractPackageDeclaration(content: String): Option[String] = {
+    val lines = content.split("\n")
+    
+    lines.foreach { line =>
+      val trimmed = line.trim
+      if (trimmed.startsWith("package ")) {
+        val packagePattern = """package\s+([\w.]+)""".r
+        packagePattern.findFirstMatchIn(trimmed) match {
+          case Some(m) => return Some(m.group(1))
+          case None =>
+        }
+      }
+    }
+    None
   }
   
   // Public method for testing
@@ -153,93 +229,35 @@ class CodeFlattener(sourceDirs: Seq[File], log: Logger) {
     classes.toSet
   }
   
-  private def loadAllSourceFiles(): Unit = {
-    sourceDirs.foreach { dir =>
-      if (dir.exists() && dir.isDirectory) {
-        val scalaFiles = findScalaFiles(dir)
-        log.debug(s"Found ${scalaFiles.length} Scala files in ${dir.getPath}")
-        scalaFiles.foreach { file =>
-          val content = Source.fromFile(file).getLines().mkString("\n")
-          allSourceFiles(file.getPath) = (file, content)
-        }
-      }
-    }
-    log.debug(s"Loaded ${allSourceFiles.size} source files")
-  }
-  
-  private def buildLocalClassIndex(): Unit = {
-    allSourceFiles.values.foreach { case (_, content) =>
-      val classNames = extractClassDefinitions(content)
-      localClassNames ++= classNames
-    }
-    log.debug(s"Local class names found: ${localClassNames.mkString(", ")}")
-  }
-  
-  private def findScalaFiles(dir: File): List[File] = {
-    val files = mutable.ListBuffer[File]()
-    
-    def traverse(f: File): Unit = {
-      if (f.isDirectory) {
-        Option(f.listFiles()).foreach(_.foreach(traverse))
-      } else if (f.getName.endsWith(".scala")) {
-        files += f
-      }
-    }
-    
-    traverse(dir)
-    files.toList
-  }
-  
-  private def removePackagesAndImports(content: String): String = {
+  /**
+   * Encuentra imports con wildcards en el contenido
+   * Retorna lista de paquetes con wildcard: Set("a.b.geometry", "a.b")
+   */
+  private def findWildcardImports(content: String): Set[String] = {
+    val wildcards = mutable.Set[String]()
     val lines = content.split("\n")
-    val filteredLines = lines.filterNot { line =>
+    
+    val wildcardPattern = """import\s+([\w.]+)\._""".r
+    
+    lines.foreach { line =>
       val trimmed = line.trim
-      if (trimmed.startsWith("package ")) {
-        true
-      } else if (trimmed.startsWith("import ")) {
-        // Check if this import line contains any local classes
-        shouldRemoveImport(trimmed)
-      } else {
-        false
+      if (trimmed.startsWith("import ")) {
+        wildcardPattern.findFirstMatchIn(trimmed) match {
+          case Some(m) => 
+            val packageName = m.group(1)
+            wildcards += packageName
+            log.debug(s"Found wildcard import: $packageName._")
+          case None =>
+        }
       }
     }
-    filteredLines.mkString("\n")
-  }
-  
-  private def shouldRemoveImport(importLine: String): Boolean = {
-    val trimmed = importLine.trim
-    log.debug(s"Checking import: $trimmed")
     
-    // Check for multiple import pattern FIRST: import com.example.{Class1, Class2}  
-    val multiImportPattern = """import\s+[\w.]*\.\{([^}]+)\}""".r
-    multiImportPattern.findFirstMatchIn(trimmed) match {
-      case Some(m) =>
-        val classNames = m.group(1).split(",").map(_.trim)
-        log.debug(s"Multiple import classes: ${classNames.mkString(", ")}")
-        // Remove import if ANY of the classes is local
-        val shouldRemove = classNames.exists(className => {
-          val contains = localClassNames.contains(className)
-          log.debug(s"Class '$className' is local: $contains")
-          contains
-        })
-        log.debug(s"Multiple import shouldRemove: $shouldRemove")
-        shouldRemove
-      case None =>
-        // Single import pattern: import com.example.ClassName
-        val singleImportPattern = """import\s+[\w.]*\.(\w+)""".r
-        singleImportPattern.findFirstMatchIn(trimmed) match {
-          case Some(m) => 
-            val className = m.group(1)
-            val shouldRemove = localClassNames.contains(className)
-            log.debug(s"Single import '$className' -> shouldRemove: $shouldRemove")
-            shouldRemove
-          case None => 
-            log.debug(s"No pattern matched for: $trimmed")
-            false
-        }
-    }
+    wildcards.toSet
   }
   
+  /**
+   * Encuentra imports específicos de clases
+   */
   private def findImportedClasses(content: String): Set[String] = {
     val imports = mutable.Set[String]()
     val lines = content.split("\n")
@@ -267,6 +285,104 @@ class CodeFlattener(sourceDirs: Seq[File], log: Logger) {
     imports.toSet
   }
   
+  /**
+   * Encuentra todos los archivos que corresponden a un wildcard import
+   * Para "a.b.geometry._" -> archivos que declaren "package a.b.geometry"
+   * Para "a.b._" -> archivos que declaren "package a.b.geometry", "package a.b.generic_algo", etc.
+   */
+  private def findFilesForWildcardPackage(wildcardPackage: String): Set[File] = {
+    val matchingFiles = mutable.Set[File]()
+    
+    packageToFiles.foreach { case (declaredPackage, files) =>
+      if (isPackageMatch(declaredPackage, wildcardPackage)) {
+        matchingFiles ++= files
+        log.debug(s"Package '$declaredPackage' matches wildcard '$wildcardPackage._'")
+      }
+    }
+    
+    if (matchingFiles.isEmpty) {
+      log.debug(s"No files found for wildcard import: $wildcardPackage._")
+    }
+    
+    matchingFiles.toSet
+  }
+  
+  /**
+   * Verifica si un paquete declarado coincide con un wildcard import
+   * isPackageMatch("a.b.geometry", "a.b.geometry") -> true (exacto)
+   * isPackageMatch("a.b.geometry", "a.b") -> true (sub-paquete)
+   * isPackageMatch("a.b.geometry", "a.c") -> false
+   */
+  private def isPackageMatch(declaredPackage: String, wildcardPackage: String): Boolean = {
+    if (declaredPackage == wildcardPackage) {
+      // Coincidencia exacta: import a.b.geometry._ con package a.b.geometry
+      true
+    } else if (declaredPackage.startsWith(wildcardPackage + ".")) {
+      // Sub-paquete: import a.b._ con package a.b.geometry
+      true
+    } else {
+      false
+    }
+  }
+  
+  /**
+   * Incluye todos los archivos referenciados por imports wildcards
+   */
+  private def addWildcardDependencies(content: String, alreadyProcessed: mutable.Set[String], output: mutable.ListBuffer[String]): Unit = {
+    val wildcardPackages = findWildcardImports(content)
+    
+    wildcardPackages.foreach { wildcardPackage =>
+      log.debug(s"Processing wildcard import: $wildcardPackage._")
+      
+      val matchingFiles = findFilesForWildcardPackage(wildcardPackage)
+      
+      matchingFiles.foreach { file =>
+        if (!alreadyProcessed.contains(file.getPath)) {
+          try {
+            val fileContent = allSourceFiles(file.getPath)._2
+            val cleanContent = removePackagesAndImports(fileContent)
+            output += cleanContent
+            alreadyProcessed += file.getPath
+            log.debug(s"Added wildcard dependency: ${file.getName} from wildcard $wildcardPackage._")
+            
+            // Procesar recursivamente las dependencias de este archivo
+            addDependenciesRecursively(fileContent, alreadyProcessed, output)
+            addWildcardDependencies(fileContent, alreadyProcessed, output)
+            
+          } catch {
+            case ex: Exception =>
+              log.warn(s"Could not process wildcard dependency ${file.getName}: ${ex.getMessage}")
+          }
+        }
+      }
+    }
+  }
+  
+  /**
+   * Método auxiliar actualizado para recibir parámetros adicionales
+   */
+  private def addDependenciesRecursively(content: String, alreadyProcessed: mutable.Set[String], output: mutable.ListBuffer[String]): Unit = {
+    val importedClasses = findImportedClasses(content)
+    
+    importedClasses.foreach { className =>
+      if (localClassNames.contains(className)) {
+        findFileContainingClass(className) match {
+          case Some((file, depContent)) if !alreadyProcessed.contains(file.getPath) =>
+            alreadyProcessed += file.getPath
+            val cleanContent = removePackagesAndImports(depContent)
+            output += cleanContent
+            log.debug(s"Added dependency: ${file.getName} for class $className")
+            addDependenciesRecursively(depContent, alreadyProcessed, output)
+            addWildcardDependencies(depContent, alreadyProcessed, output)
+          case _ =>
+        }
+      }
+    }
+  }
+  
+  /**
+   * Encuentra el archivo que contiene una clase específica
+   */
   private def findFileContainingClass(className: String): Option[(File, String)] = {
     allSourceFiles.values.foreach { case (file, content) =>
       if (containsClassDefinition(content, className)) {
@@ -276,6 +392,9 @@ class CodeFlattener(sourceDirs: Seq[File], log: Logger) {
     None
   }
   
+  /**
+   * Verifica si el contenido contiene la definición de una clase
+   */
   private def containsClassDefinition(content: String, className: String): Boolean = {
     val lines = content.split("\n")
     
@@ -296,6 +415,79 @@ class CodeFlattener(sourceDirs: Seq[File], log: Logger) {
       } else {
         false
       }
+    }
+  }
+  
+  /**
+   * Remueve paquetes e imports, manteniendo externos
+   */
+  private def removePackagesAndImports(content: String): String = {
+    val lines = content.split("\n")
+    val filteredLines = lines.filterNot { line =>
+      val trimmed = line.trim
+      if (trimmed.startsWith("package ")) {
+        true
+      } else if (trimmed.startsWith("import ")) {
+        // Remover imports locales (tanto específicos como wildcards)
+        shouldRemoveImport(trimmed)
+      } else {
+        false
+      }
+    }
+    filteredLines.mkString("\n")
+  }
+  
+  /**
+   * Actualizar shouldRemoveImport para manejar wildcards
+   */
+  private def shouldRemoveImport(importLine: String): Boolean = {
+    val trimmed = importLine.trim
+    log.debug(s"Checking import: $trimmed")
+    
+    // Primero verificar si es un wildcard import
+    val wildcardPattern = """import\s+([\w.]+)\._""".r
+    wildcardPattern.findFirstMatchIn(trimmed) match {
+      case Some(m) =>
+        val wildcardPackage = m.group(1)
+        // Verificar si tenemos archivos que coincidan con este wildcard
+        val hasLocalFiles = findFilesForWildcardPackage(wildcardPackage).nonEmpty
+        log.debug(s"Wildcard import '$wildcardPackage._' has local files: $hasLocalFiles")
+        hasLocalFiles
+      case None =>
+        // Procesar imports no-wildcard como antes
+        shouldRemoveNonWildcardImport(trimmed)
+    }
+  }
+  
+  /**
+   * Método separado para imports específicos (no wildcards)
+   */
+  private def shouldRemoveNonWildcardImport(importLine: String): Boolean = {
+    // Lógica existente para imports múltiples y únicos
+    val multiImportPattern = """import\s+[\w.]*\.\{([^}]+)\}""".r
+    multiImportPattern.findFirstMatchIn(importLine) match {
+      case Some(m) =>
+        val classNames = m.group(1).split(",").map(_.trim)
+        log.debug(s"Multiple import classes: ${classNames.mkString(", ")}")
+        val shouldRemove = classNames.exists(className => {
+          val contains = localClassNames.contains(className)
+          log.debug(s"Class '$className' is local: $contains")
+          contains
+        })
+        log.debug(s"Multiple import shouldRemove: $shouldRemove")
+        shouldRemove
+      case None =>
+        val singleImportPattern = """import\s+[\w.]*\.(\w+)""".r
+        singleImportPattern.findFirstMatchIn(importLine) match {
+          case Some(m) => 
+            val className = m.group(1)
+            val shouldRemove = localClassNames.contains(className)
+            log.debug(s"Single import '$className' -> shouldRemove: $shouldRemove")
+            shouldRemove
+          case None => 
+            log.debug(s"No pattern matched for: $importLine")
+            false
+        }
     }
   }
 }
