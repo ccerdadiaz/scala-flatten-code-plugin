@@ -2,7 +2,7 @@
 // PROJECT BASIC CONFIGURATION
 // ============================================
 ThisBuild / version := "1.0.0"
-ThisBuild / scalaVersion := "2.12.17"
+ThisBuild / scalaVersion := "2.12.18"
 ThisBuild / organization := "edu.krlos"
 
 // ============================================
@@ -19,12 +19,6 @@ lazy val root = (project in file("."))
     description := "Plugin to flatten code in Scala projects",
     licenses := Seq("Creative Commons Attribution-NonCommercial-ShareAlike 4.0**" -> url("https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode.txt")),
     
-    // Minimum supported SBT version
-    pluginCrossBuild / sbtVersion := "1.5.0",
-    
-    // Publishing configurations
-    publishMavenStyle := true,
-    Test / publishArtifact := false,
     
     // ============================================
     // DEVELOPMENT AND TESTING DEPENDENCIES

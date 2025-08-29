@@ -41,177 +41,356 @@ class CodeFlattenerSpec extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     file
   }
   
-  "CodeFlattener" should "remove package declarations from single file" in {
-    val mainContent = 
-      """package com.example
-        |
-        |object Main {
-        |  def main(args: Array[String]): Unit = {
-        |    println("Hello")
-        |  }
-        |}""".stripMargin
-    
-    val mainFile = createFile("Main.scala", mainContent)
-    val flattener = new CodeFlattener(Seq(sourceDir), testLogger)
-    
-    val result = flattener.flatten(mainFile)
-    
-    result should not include "package com.example"
-    result should include("object Main")
-    result should include("println(\"Hello\")")
-  }
-  
-  it should "preserve external imports but remove local imports" in {
-    val mainContent = 
-      """package com.example
+  "CodeFlattener" should "remove packages and preserve external imports" in {
+    val playerContent = 
+      """package contests.codingame.robowars
         |
         |import scala.collection.mutable.ListBuffer
-        |import com.example.utils.Helper
         |
-        |object Main {
-        |  def main(args: Array[String]): Unit = {
-        |    val buffer = ListBuffer[String]()
-        |    Helper.doSomething()
-        |  }
+        |object Player extends App {
+        |  val buffer = ListBuffer[String]()
+        |  println("Hello CodeFlattener!")
         |}""".stripMargin
     
-    val helperContent = 
-      """package com.example.utils
-        |
-        |object Helper {
-        |  def doSomething(): Unit = println("Helper")
-        |}""".stripMargin
+    val playerFile = createFile("Player.scala", playerContent)
+    val flattener = new CodeFlattener(sourceDir, testLogger)
     
-    val mainFile = createFile("Main.scala", mainContent)
-    createFile("utils/Helper.scala", helperContent)
+    val result = flattener.flatten(playerFile)
     
-    val flattener = new CodeFlattener(Seq(sourceDir), testLogger)
-    val result = flattener.flatten(mainFile)
+    // Should remove package
+    result should not include "package contests.codingame.robowars"
     
     // Should preserve external import
     result should include("import scala.collection.mutable.ListBuffer")
-    // Should remove local import
-    result should not include "import com.example.utils.Helper"
-    // Should include both classes without packages
-    result should include("object Main")
-    result should include("object Helper")
+    
+    // Should include main content
+    result should include("object Player extends App")
+    result should include("println(\"Hello CodeFlattener!\")")
   }
   
-  it should "include dependencies recursively" in {
-    val mainContent = 
-      """package com.example
+  it should "include same-package classes referenced in code" in {
+    val playerContent = 
+      """package contests.codingame.robowars
         |
-        |import com.example.model.Person
-        |
-        |object Main {
-        |  def main(args: Array[String]): Unit = {
-        |    val person = Person("John", Address("Street"))
-        |  }
+        |object Player extends App {
+        |  val state = new GameState()
+        |  val helper = HelperUtils
+        |  println("Game starting")
         |}""".stripMargin
     
-    val personContent = 
-      """package com.example.model
+    val gameStateContent = 
+      """package contests.codingame.robowars
         |
-        |import com.example.model.Address
-        |
-        |case class Person(name: String, address: Address)""".stripMargin
-    
-    val addressContent = 
-      """package com.example.model
-        |
-        |case class Address(street: String)""".stripMargin
-    
-    val mainFile = createFile("Main.scala", mainContent)
-    createFile("model/Person.scala", personContent)
-    createFile("model/Address.scala", addressContent)
-    
-    val flattener = new CodeFlattener(Seq(sourceDir), testLogger)
-    val result = flattener.flatten(mainFile)
-    
-    // Should include all three definitions
-    result should include("object Main")
-    result should include("case class Person")
-    result should include("case class Address")
-    
-    // Should not include any packages
-    result should not include "package"
-    
-    // Should not include local imports
-    result should not include "import com.example"
-  }
-  
-  it should "handle multiple source directories" in {
-    val mainContent = 
-      """import utils.Helper
-        |
-        |object Main {
-        |  Helper.help()
-        |}""".stripMargin
+        |case class GameState(turn: Int = 1)""".stripMargin
     
     val helperContent = 
-      """object Helper {
-        |  def help(): Unit = println("Help")
+      """package contests.codingame.robowars
+        |
+        |object HelperUtils {
+        |  def debug(msg: String): Unit = println(s"DEBUG: $msg")
         |}""".stripMargin
     
-    val mainFile = createFile("Main.scala", mainContent)
+    // Tool in same package but NOT referenced -> should NOT be included
+    val toolContent = 
+      """package contests.codingame.robowars
+        |
+        |object FancyGenerator extends App {
+        |  println("Generating fancy stuff...")
+        |}""".stripMargin
     
-    val utilsDir = new File(tempDir.toFile, "utils")
-    utilsDir.mkdirs()
-    val helperFile = new File(utilsDir, "Helper.scala")
-    val writer = new PrintWriter(helperFile)
-    try {
-      writer.write(helperContent)
-    } finally {
-      writer.close()
-    }
+    val playerFile = createFile("Player.scala", playerContent)
+    createFile("GameState.scala", gameStateContent)
+    createFile("HelperUtils.scala", helperContent)
+    createFile("FancyGenerator.scala", toolContent)
     
-    val flattener = new CodeFlattener(Seq(sourceDir, utilsDir), testLogger)
-    val result = flattener.flatten(mainFile)
+    val flattener = new CodeFlattener(sourceDir, testLogger)
+    val result = flattener.flatten(playerFile)
     
-    result should include("object Main")
-    result should include("object Helper")
+    // Should include referenced same-package classes
+    result should include("case class GameState")
+    result should include("object HelperUtils")
+    result should include("object Player extends App")
+    
+    // Should NOT include unreferenced tool
+    result should not include "object FancyGenerator"
+    result should not include "Generating fancy stuff"
+    
+    // Should remove all packages
+    result should not include "package contests.codingame.robowars"
+  }
+  
+  it should "include classes from specific imports" in {
+    val playerContent = 
+      """package contests.codingame.robowars
+        |
+        |import contests.geometry.Point
+        |import contests.ai.Strategy
+        |
+        |object Player extends App {
+        |  val pos = Point(0, 0)
+        |  val strategy = Strategy.aggressive()
+        |}""".stripMargin
+    
+    val pointContent = 
+      """package contests.geometry
+        |
+        |case class Point(x: Int, y: Int)""".stripMargin
+    
+    val strategyContent = 
+      """package contests.ai
+        |
+        |object Strategy {
+        |  def aggressive(): String = "ATTACK"
+        |}""".stripMargin
+    
+    val playerFile = createFile("Player.scala", playerContent)
+    createFile("Point.scala", pointContent)
+    createFile("Strategy.scala", strategyContent)
+    
+    val flattener = new CodeFlattener(sourceDir, testLogger)
+    val result = flattener.flatten(playerFile)
+    
+    result should include("object Player extends App")
+    result should include("case class Point")
+    result should include("object Strategy")
+    
+    // Should remove packages and local imports
+    result should not include "package"
+    result should not include "import contests.geometry.Point"
+    result should not include "import contests.ai.Strategy"
+  }
+  
+  it should "include classes from multiple imports" in {
+    val playerContent = 
+      """package contests.codingame.robowars
+        |
+        |import contests.geometry.{Point, Vector, Board}
+        |
+        |object Player extends App {
+        |  val pos = Point(1, 1)
+        |  println("Using geometry classes")
+        |}""".stripMargin
+    
+    val pointContent = 
+      """package contests.geometry
+        |
+        |case class Point(x: Int, y: Int)""".stripMargin
+    
+    val vectorContent = 
+      """package contests.geometry
+        |
+        |case class Vector(dx: Int, dy: Int)""".stripMargin
+    
+    val boardContent = 
+      """package contests.geometry
+        |
+        |case class Board(width: Int, height: Int)""".stripMargin
+    
+    val playerFile = createFile("Player.scala", playerContent)
+    createFile("Point.scala", pointContent)
+    createFile("Vector.scala", vectorContent)
+    createFile("Board.scala", boardContent)
+    
+    val flattener = new CodeFlattener(sourceDir, testLogger)
+    val result = flattener.flatten(playerFile)
+    
+    // Should include ALL classes from multiple import (even if not directly used)
+    result should include("case class Point")
+    result should include("case class Vector")
+    result should include("case class Board")
+    result should include("object Player extends App")
+    
+    // Should remove local imports and packages
+    result should not include "import contests.geometry.{Point, Vector, Board}"
+    result should not include "package"
+  }
+  
+  it should "include all classes from wildcard imports" in {
+    val playerContent = 
+      """package contests.codingame.robowars
+        |
+        |import contests.ai._
+        |
+        |object Player extends App {
+        |  val neural = NeuralNetwork()
+        |  println("AI ready")
+        |}""".stripMargin
+    
+    val neuralContent = 
+      """package contests.ai
+        |
+        |case class NeuralNetwork() {
+        |  def predict(): String = "MOVE_UP"
+        |}""".stripMargin
+    
+    val dataContent = 
+      """package contests.ai
+        |
+        |case class NeuralData(weights: List[Double])""".stripMargin
+    
+    val playerFile = createFile("Player.scala", playerContent)
+    createFile("NeuralNetwork.scala", neuralContent)
+    createFile("NeuralData.scala", dataContent)
+    
+    val flattener = new CodeFlattener(sourceDir, testLogger)
+    val result = flattener.flatten(playerFile)
+    
+    // Should include ALL classes from wildcard package (even unused ones)
+    result should include("case class NeuralNetwork")
+    result should include("case class NeuralData") // Not directly used but in wildcard
+    result should include("object Player extends App")
+    
+    // Should remove wildcard import and packages
+    result should not include "import contests.ai._"
+    result should not include "package"
+  }
+  
+  it should "handle recursive dependencies" in {
+    val playerContent = 
+      """package contests.codingame.robowars
+        |
+        |import contests.geometry.Point
+        |
+        |object Player extends App {
+        |  val pos = Point(1, 1)
+        |}""".stripMargin
+    
+    val pointContent = 
+      """package contests.geometry
+        |
+        |import contests.math.Calculator
+        |
+        |case class Point(x: Int, y: Int) {
+        |  def distance(): Double = Calculator.sqrt(x * x + y * y)
+        |}""".stripMargin
+    
+    val calculatorContent = 
+      """package contests.math
+        |
+        |object Calculator {
+        |  def sqrt(value: Double): Double = math.sqrt(value)
+        |}""".stripMargin
+    
+    val playerFile = createFile("Player.scala", playerContent)
+    createFile("Point.scala", pointContent)
+    createFile("Calculator.scala", calculatorContent)
+    
+    val flattener = new CodeFlattener(sourceDir, testLogger)
+    val result = flattener.flatten(playerFile)
+    
+    // Should include all dependencies recursively
+    result should include("object Player extends App")
+    result should include("case class Point")
+    result should include("object Calculator") // Recursive dependency
+    
+    // Should remove all packages and local imports
+    result should not include "package"
+    result should not include "import contests.geometry.Point"
+    result should not include "import contests.math.Calculator"
+  }
+  
+  it should "detect various types of direct references in code" in {
+    val playerContent = 
+      """package contests.codingame.robowars
+        |
+        |object Player extends App {
+        |  val state = new GameState()      // constructor
+        |  val pos = Point(1, 2)           // companion apply
+        |  Board.createEmpty()             // static method
+        |  println(Constants.MAX_SIZE)     // static field
+        |}""".stripMargin
+    
+    val gameStateContent = 
+      """package contests.codingame.robowars
+        |
+        |case class GameState()""".stripMargin
+    
+    val pointContent = 
+      """package contests.codingame.robowars
+        |
+        |case class Point(x: Int, y: Int)""".stripMargin
+    
+    val boardContent = 
+      """package contests.codingame.robowars
+        |
+        |object Board {
+        |  def createEmpty(): String = "empty"
+        |}""".stripMargin
+    
+    val constantsContent = 
+      """package contests.codingame.robowars
+        |
+        |object Constants {
+        |  val MAX_SIZE = 100
+        |}""".stripMargin
+    
+    val playerFile = createFile("Player.scala", playerContent)
+    createFile("GameState.scala", gameStateContent)
+    createFile("Point.scala", pointContent)
+    createFile("Board.scala", boardContent)
+    createFile("Constants.scala", constantsContent)
+    
+    val flattener = new CodeFlattener(sourceDir, testLogger)
+    val result = flattener.flatten(playerFile)
+    
+    // Should detect and include all referenced classes
+    result should include("object Player extends App")
+    result should include("case class GameState") // from "new GameState()"
+    result should include("case class Point")     // from "Point(1, 2)"
+    result should include("object Board")         // from "Board.createEmpty()"
+    result should include("object Constants")     // from "Constants.MAX_SIZE"
   }
   
   it should "not duplicate classes when included multiple times" in {
-    val mainContent = 
-      """import model.{Person, Address}
+    val playerContent = 
+      """package contests.codingame.robowars
         |
-        |object Main {
-        |  val person = Person("John", Address("Street"))
+        |import contests.geometry.{Point, Board}
+        |
+        |object Player extends App {
+        |  val pos = Point(1, 2)
         |}""".stripMargin
     
-    val personContent = 
-      """import model.Address
+    val pointContent = 
+      """package contests.geometry
         |
-        |case class Person(name: String, address: Address)""".stripMargin
+        |case class Point(x: Int, y: Int)""".stripMargin
     
-    val addressContent = 
-      """case class Address(street: String)""".stripMargin
+    val boardContent = 
+      """package contests.geometry
+        |
+        |import contests.geometry.Point
+        |
+        |case class Board(corners: List[Point])""".stripMargin
     
-    val mainFile = createFile("Main.scala", mainContent)
-    createFile("model/Person.scala", personContent)
-    createFile("model/Address.scala", addressContent)
+    val playerFile = createFile("Player.scala", playerContent)
+    createFile("Point.scala", pointContent)
+    createFile("Board.scala", boardContent)
     
-    val flattener = new CodeFlattener(Seq(sourceDir), testLogger)
-    val result = flattener.flatten(mainFile)
+    val flattener = new CodeFlattener(sourceDir, testLogger)
+    val result = flattener.flatten(playerFile)
     
-    // Count occurrences of Address class definition
-    val addressCount = "case class Address".r.findAllIn(result).length
-    addressCount shouldBe 1
+    // Count occurrences of Point class definition
+    val pointCount = "case class Point".r.findAllIn(result).length
+    pointCount shouldBe 1
+    
+    result should include("case class Board")
+    result should include("object Player extends App")
   }
   
-  it should "extract class names correctly from different definition types" in {
+  // Test para el método público extractClasses (needed for testing)
+  it should "extract class definitions correctly" in {
     val content = 
-      """class RegularClass
+      """package test
+        |
+        |class RegularClass
         |case class CaseClass(value: Int)
         |object SingletonObject
         |trait SomeTrait
         |sealed trait SealedTrait""".stripMargin
     
-    val file = createFile("Definitions.scala", content)
-    val flattener = new CodeFlattener(Seq(sourceDir), testLogger)
-    
-    val result = flattener.extractClassDefinitions(content)
+    val flattener = new CodeFlattener(sourceDir, testLogger)
+    val result = flattener.extractClasses(content)
     
     result should contain("RegularClass")
     result should contain("CaseClass")
@@ -220,317 +399,84 @@ class CodeFlattenerSpec extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     result should contain("SealedTrait")
   }
   
-  // NUEVAS PRUEBAS PARA WILDCARDS - Empezando con caso simple
-  
-  it should "handle simple wildcard import with one file" in {
-    val mainContent = 
-      """import test.geometry._
-        |
-        |object Main {
-        |  val point = Point(1, 2)
-        |}""".stripMargin
-    
-    val pointContent = 
-      """package test.geometry
-        |
-        |case class Point(x: Int, y: Int)""".stripMargin
-    
-    val mainFile = createFile("Main.scala", mainContent)
-    createFile("Point.scala", pointContent)
-    
-    val flattener = new CodeFlattener(Seq(sourceDir), testLogger)
-    val result = flattener.flatten(mainFile)
-    
-    println("=== SIMPLE WILDCARD RESULT ===")
-    println(result)
-    println("===============================")
-    
-    result should include("case class Point")
-    result should include("object Main")
-    result should not include "package"
-    result should not include "import test.geometry._"
-  }
-  
-  it should "handle exact wildcard imports based on package declarations" in {
-    val mainContent = 
-      """import a.b.geometry._
-        |
-        |object Main {
-        |  val point = Point(1, 2)
-        |  val line = Line(point, Point(3, 4))
-        |}""".stripMargin
-    
-    val pointContent = 
-      """package a.b.geometry
-        |
-        |case class Point(x: Int, y: Int)""".stripMargin
-    
-    val lineContent = 
-      """package a.b.geometry
-        |
-        |case class Line(start: Point, end: Point)""".stripMargin
-    
-    // Archivo que NO debe incluirse (diferente paquete)
-    val algorithmContent = 
-      """package a.b.algorithms
-        |
-        |object Sort {
-        |  def quickSort[T](list: List[T]): List[T] = list
-        |}""".stripMargin
-    
-    val mainFile = createFile("Main.scala", mainContent)
-    createFile("parts/Point.scala", pointContent)        // Estructura libre de directorios
-    createFile("geometry/Line.scala", lineContent)       // Estructura libre de directorios
-    createFile("algo/Sort.scala", algorithmContent)      // No debe incluirse
-    
-    val flattener = new CodeFlattener(Seq(sourceDir), testLogger)
-    val result = flattener.flatten(mainFile)
-    
-    // Debe incluir archivos del paquete a.b.geometry
-    result should include("case class Point")
-    result should include("case class Line")
-    result should include("object Main")
-    
-    // NO debe incluir archivos de otros paquetes
-    result should not include "object Sort"
-    
-    // No debe incluir packages ni imports locales
-    result should not include "package"
-    result should not include "import a.b.geometry._"
-  }
-  
-  it should "handle parent wildcard imports including all sub-packages" in {
-    val mainContent = 
-      """import a.b._
-        |
-        |object GameEngine {
-        |  val player = Player("Hero", Point(0, 0))
-        |  val ai = MinimaxAI()
-        |}""".stripMargin
-    
+  // Integration test: proyecto completo competitive programming
+  "Integration test" should "flatten a complete competitive programming project" in {
     val playerContent = 
-      """package a.b.model
+      """package contests.codingame.robowars
         |
-        |case class Player(name: String, position: Point)""".stripMargin
-    
-    val pointContent = 
-      """package a.b.geometry
-        |
-        |case class Point(x: Int, y: Int)""".stripMargin
-    
-    val aiContent = 
-      """package a.b.ai
-        |
-        |case class MinimaxAI()""".stripMargin
-    
-    // Archivo que NO debe incluirse (paquete diferente)
-    val utilsContent = 
-      """package utils.helpers
-        |
-        |object StringUtils {
-        |  def reverse(s: String): String = s.reverse
-        |}""".stripMargin
-    
-    val mainFile = createFile("Main.scala", mainContent)
-    createFile("models/Player.scala", playerContent)     // a.b.model -> incluir
-    createFile("geom/Point.scala", pointContent)         // a.b.geometry -> incluir
-    createFile("ai/Minimax.scala", aiContent)            // a.b.ai -> incluir
-    createFile("utils/StringUtils.scala", utilsContent)  // utils.helpers -> NO incluir
-    
-    val flattener = new CodeFlattener(Seq(sourceDir), testLogger)
-    val result = flattener.flatten(mainFile)
-    
-    // Debe incluir todos los sub-paquetes de a.b
-    result should include("case class Player")    // a.b.model
-    result should include("case class Point")     // a.b.geometry
-    result should include("case class MinimaxAI") // a.b.ai
-    result should include("object GameEngine")
-    
-    // No debe incluir paquetes externos
-    result should not include "object StringUtils"
-    
-    // No debe incluir declaraciones de paquete
-    result should not include "package"
-    result should not include "import a.b._"
-  }
-  
-  it should "handle wildcards with files in arbitrary directory structure" in {
-    val mainContent = 
-      """import competitive.utils._
-        |
-        |object Solution {
-        |  def solve(): Unit = {
-        |    val helper = MathHelper
-        |    val parser = InputParser()
-        |  }
-        |}""".stripMargin
-    
-    val mathContent = 
-      """package competitive.utils
-        |
-        |object MathHelper {
-        |  def gcd(a: Int, b: Int): Int = if (b == 0) a else gcd(b, a % b)
-        |}""".stripMargin
-    
-    val parserContent = 
-      """package competitive.utils
-        |
-        |case class InputParser() {
-        |  def readInt(): Int = scala.io.StdIn.readInt()
-        |}""".stripMargin
-    
-    val mainFile = createFile("Solution.scala", mainContent)
-    // Estructura de directorios completamente arbitraria
-    createFile("random/deep/nested/MathHelper.scala", mathContent)
-    createFile("somewhere/else/InputParser.scala", parserContent)
-    
-    val flattener = new CodeFlattener(Seq(sourceDir), testLogger)
-    val result = flattener.flatten(mainFile)
-    
-    result should include("object Solution")
-    result should include("object MathHelper")
-    result should include("case class InputParser")
-    result should not include "package competitive.utils"
-    result should not include "import competitive.utils._"
-  }
-  
-  it should "handle wildcard imports combined with specific imports" in {
-    val mainContent = 
-      """import a.b.geometry._
-        |import a.b.algorithms.Sort
-        |import scala.collection.mutable.ListBuffer
-        |
-        |object Mixed {
-        |  val point = Point(1, 2)
-        |  val sorted = Sort.quickSort(List(3, 1, 2))
-        |  val buffer = ListBuffer[String]()
-        |}""".stripMargin
-    
-    val pointContent = 
-      """package a.b.geometry
-        |
-        |case class Point(x: Int, y: Int)""".stripMargin
-    
-    val circleContent = 
-      """package a.b.geometry
-        |
-        |case class Circle(center: Point, radius: Double)""".stripMargin
-    
-    val sortContent = 
-      """package a.b.algorithms
-        |
-        |object Sort {
-        |  def quickSort[T](list: List[T]): List[T] = list.sorted
-        |}""".stripMargin
-    
-    val mainFile = createFile("Mixed.scala", mainContent)
-    createFile("Point.scala", pointContent)
-    createFile("Circle.scala", circleContent)
-    createFile("Sort.scala", sortContent)
-    
-    val flattener = new CodeFlattener(Seq(sourceDir), testLogger)
-    val result = flattener.flatten(mainFile)
-    
-    // Wildcard debe incluir todo a.b.geometry
-    result should include("case class Point")
-    result should include("case class Circle")  // Incluido aunque no se use
-    
-    // Import específico debe incluir Sort
-    result should include("object Sort")
-    
-    // Import externo debe preservarse
-    result should include("import scala.collection.mutable.ListBuffer")
-    
-    // Imports locales deben eliminarse
-    result should not include "import a.b.geometry._"
-    result should not include "import a.b.algorithms.Sort"
-  }
-  
-  it should "handle recursive wildcard dependencies" in {
-    val mainContent = 
-      """import game.engine._
-        |
-        |object Game {
-        |  val engine = GameEngine()
-        |}""".stripMargin
-    
-    val engineContent = 
-      """package game.engine
-        |
-        |import game.model._
-        |
-        |case class GameEngine() {
-        |  val player = Player("Hero")
-        |}""".stripMargin
-    
-    val playerContent = 
-      """package game.model
-        |
-        |case class Player(name: String)""".stripMargin
-    
-    val statsContent = 
-      """package game.model
-        |
-        |case class Stats(level: Int)""".stripMargin
-    
-    val mainFile = createFile("Game.scala", mainContent)
-    createFile("GameEngine.scala", engineContent)
-    createFile("Player.scala", playerContent)
-    createFile("Stats.scala", statsContent)
-    
-    val flattener = new CodeFlattener(Seq(sourceDir), testLogger)
-    val result = flattener.flatten(mainFile)
-    
-    // Debe incluir engine por wildcard directo
-    result should include("case class GameEngine")
-    
-    // Debe incluir todo game.model por wildcard en GameEngine
-    result should include("case class Player")
-    result should include("case class Stats")  // Incluido aunque no se use
-    
-    result should include("object Game")
-    result should not include "package"
-    result should not include "import game.engine._"
-    result should not include "import game.model._"
-  }
-  
-  "Integration test" should "flatten a complete competitive programming project with wildcards" in {
-    val solutionContent = 
-      """import competitive.geometry._
+        |import contests.geometry._
+        |import contests.codingame.robowars.solution._
         |import scala.io.StdIn
         |
-        |object Solution {
-        |  def main(args: Array[String]): Unit = {
-        |    val point = Point(1, 2)
-        |    println(point.x)
+        |object Player extends App {
+        |  val board = GameBoard()
+        |  val pos = Point(StdIn.readInt(), StdIn.readInt())
+        |  val strategy = Strategy.defensive()
+        |  println(pos.x)
+        |}""".stripMargin
+    
+    // Clases de solución (paquete diferente, incluidas por wildcard)
+    val gameBoardContent = 
+      """package contests.codingame.robowars.solution
+        |
+        |case class GameBoard() {
+        |  def isValid(): Boolean = true
+        |}""".stripMargin
+    
+    val strategyContent = 
+      """package contests.codingame.robowars.solution
+        |
+        |object Strategy {
+        |  def defensive(): String = "DEFEND"
+        |}""".stripMargin
+    
+    // Clase reutilizable (geometría)
+    val pointContent = 
+      """package contests.geometry
+        |
+        |case class Point(x: Int, y: Int) {
+        |  def distance(other: Point): Double = {
+        |    math.sqrt(math.pow(x - other.x, 2) + math.pow(y - other.y, 2))
         |  }
         |}""".stripMargin
     
-    val pointContent = 
-      """package competitive.geometry
+    // Herramienta en mismo paquete que NO debe incluirse (no referenciada)
+    val toolContent = 
+      """package contests.codingame.robowars
         |
-        |case class Point(x: Int, y: Int)""".stripMargin
+        |object TestDataGenerator extends App {
+        |  println("Generating test data...")
+        |}""".stripMargin
     
-    val solutionFile = createFile("Solution.scala", solutionContent)
-    createFile("geometry/Point.scala", pointContent)
+    val playerFile = createFile("Player.scala", playerContent)
+    createFile("GameBoard.scala", gameBoardContent)
+    createFile("Strategy.scala", strategyContent)
+    createFile("Point.scala", pointContent)
+    createFile("TestDataGenerator.scala", toolContent)
     
-    val flattener = new CodeFlattener(Seq(sourceDir), testLogger)
-    val result = flattener.flatten(solutionFile)
+    val flattener = new CodeFlattener(sourceDir, testLogger)
+    val result = flattener.flatten(playerFile)
     
-    // Debug: imprimir el resultado para diagnosticar
     println("=== INTEGRATION TEST RESULT ===")
     println(result)
     println("================================")
     
-    // Verificar que incluye Point por wildcard
-    result should include("case class Point")
-    result should include("object Solution")
+    // Should include main class and all dependencies
+    result should include("object Player extends App")
+    result should include("case class GameBoard")    // wildcard: contests.codingame.robowars.solution._
+    result should include("object Strategy")         // wildcard: contests.codingame.robowars.solution._
+    result should include("case class Point")        // wildcard: contests.geometry._
     
-    // Verificar que preserva imports externos
+    // Should preserve external imports
     result should include("import scala.io.StdIn")
     
-    // Verificar que elimina paquetes e imports locales
+    // Should NOT include unreferenced tool
+    result should not include "object TestDataGenerator"
+    result should not include "Generating test data"
+    
+    // Should remove all packages and local imports
     result should not include "package"
-    result should not include "import competitive.geometry._"
+    result should not include "import contests.geometry._"
+    result should not include "import contests.codingame.robowars.solution._"
   }
 }
